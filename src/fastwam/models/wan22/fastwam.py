@@ -1219,7 +1219,10 @@ class FastWAM(torch.nn.Module):
             raise ValueError(f"Checkpoint missing both `mot` and `dit` keys: {path}")
         if self.proprio_encoder is not None:
             if "proprio_encoder" in payload:
-                self.proprio_encoder.load_state_dict(payload["proprio_encoder"], strict=True)
+                # strict=False: when fine-tuning from a 14-dim RobotWin checkpoint into a
+                # 32-dim bimanual model, the proprio_encoder input layer has a different
+                # shape and must stay at its random init (the rest of the model loads fine).
+                self.proprio_encoder.load_state_dict(payload["proprio_encoder"], strict=False)
             else:
                 logger.warning("Checkpoint has no `proprio_encoder` weights; keeping current `proprio_encoder` params.")
         elif "proprio_encoder" in payload:

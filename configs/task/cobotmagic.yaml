@@ -1,0 +1,37 @@
+# @package _global_
+#
+# Fine-tune FastWAM from the RobotWin 2.0 checkpoint on the bimanual Piper
+# CobotMagic `items_handover` task (50 train / 10 val episodes).
+#
+# Launch:
+#   bash scripts/train_zero1.sh 8 task=cobotmagic
+#
+# Validation loss is computed every `eval_every` steps (val_set_proportion=0.1667
+# in configs/data/cobotmagic.yaml holds out ~10 of 60 episodes). Watch `val_loss`
+# in the console / wandb and stop when it stops improving or starts rising.
+
+defaults:
+  - override /data: cobotmagic
+  - override /model: fastwam
+  - _self_
+
+# dataloading
+batch_size: 16
+num_workers: 8
+
+model:
+  mot_checkpoint_mixed_attn: false
+
+# scheduler
+lr_scheduler_type: "cosine"
+learning_rate: 1e-4
+num_epochs: 20 # small dataset (50 eps); watch val_loss and early-stop
+max_steps: null
+log_every: 10
+save_every: 200 # weights checkpoint every 200 steps (~30-40GB each incl. optimizer state; keep 5-10 total)
+eval_every: 50 # compute validation loss often (cheap: eval only, no disk)
+
+# training
+gradient_accumulation_steps: 1
+weight_decay: 1e-2
+resume: ./checkpoints/fastwam_release/robotwin_uncond_3cam_384.pt # start from RobotWin 2.0 weights
