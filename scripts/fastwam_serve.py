@@ -29,6 +29,15 @@ Usage (GPU machine, FastWAM env):
         --ckpt runs/cobotmagic/<run_id>/checkpoints/weights/<step>.pt \
         --stats runs/cobotmagic/<run_id>/dataset_stats.json \
         --port 8001
+
+Optional future-imagination dump: `infer_action` never runs the video denoiser,
+so add `--visualize-future` to also call `infer_joint` and write the imagined
+next ~1s (9 frames) as MP4. This adds one video-denoising pass per
+`--future-every` chunks; use e.g. `--future-every 5` to keep latency low:
+
+    python scripts/fastwam_serve.py ... \
+        --visualize-future --future-dir ./evaluate_results/live_future \
+        --future-every 5
 """
 
 from __future__ import annotations
@@ -52,6 +61,7 @@ if str(SRC_ROOT) not in sys.path:
 
 import msgpack
 import msgpack_numpy
+from websockets.exceptions import ConnectionClosed
 from websockets.sync.server import serve
 
 from hydra import compose, initialize_config_dir
@@ -60,6 +70,7 @@ from hydra.utils import instantiate
 
 from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
 from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
+from fastwam.utils.video_io import save_mp4
 
 msgpack_numpy.patch()
 
@@ -98,6 +109,11 @@ class NativeFastWAMPolicy:
         seed: int | None,
         text_cfg_scale: float,
         negative_prompt: str,
+        visualize_future: bool = False,
+        future_dir: str | None = None,
+        future_every: int = 1,
+        future_num_inference_steps: int | None = None,
+        future_fps: int = 8,
     ):
         model_cfg = cfg.model
         model_cfg.load_text_encoder = True
@@ -122,6 +138,34 @@ class NativeFastWAMPolicy:
         self.negative_prompt = str(negative_prompt)
 
         self.pending: deque[np.ndarray] = deque()
+
+        self.visualize_future = bool(visualize_future)
+        self.future_dir = Path(future_dir) if future_dir else None
+        self.future_every = max(1, int(future_every))
+        self.future_num_inference_steps = (
+            int(num_inference_steps)
+            if future_num_inference_steps is None
+            else int(future_num_inference_steps)
+        )
+        self.future_fps = int(future_fps)
+        self._chunk_index = 0
+        # 33 frames / ratio 4 -> 9 video frames, matching the training config.
+        self.num_video_frames = (
+            (int(cfg.data.train.num_frames) - 1)
+            // int(cfg.data.train.action_video_freq_ratio)
+            + 1
+        )
+        if self.visualize_future:
+            if self.future_dir is None:
+                raise ValueError("`visualize_future=True` requires a future_dir.")
+            self.future_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(
+                "future visualization ON | dir=%s | every=%d chunks | video_frames=%d | video_steps=%d",
+                self.future_dir,
+                self.future_every,
+                self.num_video_frames,
+                self.future_num_inference_steps,
+            )
 
         logger.info("native FastWAM ready | ckpt=%s | horizon=%d | replan=%d",
                     checkpoint_path, self.action_horizon, self.replan_steps)
@@ -173,7 +217,47 @@ class NativeFastWAMPolicy:
                 seed=self.seed,
                 rand_device="cpu",
             )
+        self._maybe_save_future(image_tensor, proprio, prompt)
+        self._chunk_index += 1
         return self._denormalize_action(pred["action"])[0]  # [T, D]
+
+    def _maybe_save_future(self, image_tensor: torch.Tensor, proprio: torch.Tensor, prompt: str) -> None:
+        """Run the joint video+action denoiser and dump the imagined future.
+
+        `infer_action` itself is action-only: it pre-fills the video KV cache
+        with the current frame and never denoises future latents.  This helper
+        is the only place the future is actually generated, and it is therefore
+        opt-in -- it costs one extra (small-canvas) video diffusion pass.
+        """
+        if not self.visualize_future:
+            return
+        if self._chunk_index % self.future_every != 0:
+            return
+
+        with torch.no_grad():
+            out = self.model.infer_joint(
+                prompt=prompt,
+                input_image=image_tensor,
+                num_video_frames=self.num_video_frames,
+                action_horizon=self.action_horizon,
+                proprio=proprio,
+                negative_prompt=self.negative_prompt,
+                num_inference_steps=self.future_num_inference_steps,
+                sigma_shift=self.sigma_shift,
+                seed=self.seed,
+                rand_device="cpu",
+                # Control comes from infer_action; skip its duplicate action pass.
+                test_action_with_infer_action=False,
+            )
+
+        stem = self.future_dir / f"chunk_{self._chunk_index:06d}"
+        save_mp4(out["video"], str(stem.with_suffix(".mp4")), fps=self.future_fps)
+
+        # Save the conditioning frame next to the video for reference.
+        frame = image_tensor[0].detach().float().clamp(-1, 1).permute(1, 2, 0).cpu().numpy()
+        Image.fromarray(((frame + 1.0) * 127.5).astype(np.uint8)).save(stem.parent / f"{stem.name}_input.png")
+
+        logger.info("saved imagined future: %s.mp4", stem)
 
     # ------------------------------------------------------------------ #
     # Policy API (matches the client protocol)
@@ -191,20 +275,23 @@ class NativeFastWAMPolicy:
 
 def make_handler(policy: NativeFastWAMPolicy):
     def handler(ws) -> None:
-        while True:
-            msg = msgpack.unpackb(ws.recv(), raw=False)
-            t = msg.get("type")
+        try:
+            while True:
+                msg = msgpack.unpackb(ws.recv(), raw=False)
+                t = msg.get("type")
 
-            if t == "reset":
-                policy.reset()
-                ws.send(msgpack.packb({"ok": True}))
+                if t == "reset":
+                    policy.reset()
+                    ws.send(msgpack.packb({"ok": True}))
 
-            elif t == "select_action":
-                action = policy.select_action(msg["images"], msg["state"], msg["task"])
-                ws.send(msgpack.packb({"action": action}))
+                elif t == "select_action":
+                    action = policy.select_action(msg["images"], msg["state"], msg["task"])
+                    ws.send(msgpack.packb({"action": action}))
 
-            else:
-                ws.send(msgpack.packb({"error": f"unknown message type {t!r}"}))
+                else:
+                    ws.send(msgpack.packb({"error": f"unknown message type {t!r}"}))
+        except ConnectionClosed:
+            logger.info("client disconnected")
 
     return handler
 
@@ -224,6 +311,29 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--text-cfg-scale", type=float, default=1.0)
     p.add_argument("--negative-prompt", default="")
+    p.add_argument(
+        "--visualize-future",
+        action="store_true",
+        help="also run infer_joint and dump the imagined future MP4s",
+    )
+    p.add_argument(
+        "--future-dir",
+        default="./evaluate_results/live_future",
+        help="directory for imagined-future videos (default: %(default)s)",
+    )
+    p.add_argument(
+        "--future-every",
+        type=int,
+        default=1,
+        help="dump a future every N action chunks (default: %(default)s)",
+    )
+    p.add_argument(
+        "--future-num-inference-steps",
+        type=int,
+        default=None,
+        help="video denoising steps for the future dump (default: same as --num-inference-steps)",
+    )
+    p.add_argument("--future-fps", type=int, default=8)
     args = p.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -243,9 +353,15 @@ def main() -> None:
         seed=args.seed,
         text_cfg_scale=args.text_cfg_scale,
         negative_prompt=args.negative_prompt,
+        visualize_future=args.visualize_future,
+        future_dir=args.future_dir,
+        future_every=args.future_every,
+        future_num_inference_steps=args.future_num_inference_steps,
+        future_fps=args.future_fps,
     )
 
-    with serve(make_handler(policy), args.host, args.port) as server:
+    # Clients stream raw camera frames, which easily exceed the 1 MiB default.
+    with serve(make_handler(policy), args.host, args.port, max_size=None) as server:
         logger.info("serving native FastWAM on %s:%d", args.host, args.port)
         server.serve_forever()
 
