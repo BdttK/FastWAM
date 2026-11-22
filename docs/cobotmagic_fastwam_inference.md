@@ -128,3 +128,28 @@ python deployment/rollout_fastwam.py \
 1. 关节「绝对 vs 增量」——先发一帧固定观测,打印动作和当前关节对比。
 2. FK 的 `rot6d` 约定必须和数据集转换脚本一致(见 `robots/cobotmagic_piper.py` 的 TODO)。
 3. `--stats` 必须用**自己训练 run 的** `dataset_stats.json`,不是 robotwin 那份。
+
+
+
+me:
+cd /root/gk/FastWAM
+conda activate fastwam
+python scripts/fastwam_serve.py \
+    --ckpt checkpoints/fastwam_cobotmagic_20261120/model.pt \
+    --stats checkpoints/fastwam_cobotmagic_20261120/dataset_stats.json \ --task cobotmagic \
+    --device cuda:0 \
+    --host 0.0.0.0 --port 8001 \
+    --num-inference-steps 10 \
+    --replan-steps 8
+
+
+zhuji:
+ssh -o ProxyCommand='nc -X connect -x 127.0.0.1:7897 %h %p' -p 10500 -N \
+  -L 8000:127.0.0.1:8000 -L 8001:127.0.0.1:8001 \
+  -o ServerAliveInterval=15 root@js4.blockelite.cn 
+
+
+cd /home/agilex/gk/FastWAM-RL
+python deployment/rollout_fastwam.py --host 127.0.0.1 --port 8001 \
+  --config deployment/configs/cobotmagic_real.yaml \
+  --episodes 1 --steps 0 --control-hz 10
