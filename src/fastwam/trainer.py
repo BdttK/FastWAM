@@ -22,7 +22,13 @@ from .utils.samplers import ResumableEpochSampler
 from .utils.video_io import save_mp4
 from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_ssim
 
+from .phase5_validation import evaluate_fixed
+
 logger = get_logger(__name__)
+
+# Phase 7 (20k retrain): validation and full-resume-checkpoint step schedules.
+PHASE7_VAL_STEPS = (500, 1000, 3000, 6000, 9000, 10000, 12000, 15000, 18000, 20000)
+PHASE7_FULL_SAVE_STEPS = (10000,)
 
 
 class Wan22Trainer:
@@ -78,6 +84,14 @@ class Wan22Trainer:
         self._assert_dataset_length_consistent(self.train_dataset, "train_dataset")
         if self.val_dataset is not None:
             self._assert_dataset_length_consistent(self.val_dataset, "val_dataset")
+
+        # Load pretrained weights before ZeRO clones its FP32 master parameters.
+        # Loading after `accelerator.prepare` leaves the optimizer's master copy stale
+        # and the first optimizer step would overwrite the loaded weights.
+        if self.resume and Path(str(self.resume)).is_file():
+            self.model.load_checkpoint(str(self.resume), optimizer=None)
+            logger.info("Pretrained weights loaded before optimizer initialization: %s", self.resume)
+            self.resume = None
 
         # Freeze non-trainable modules before optimizer/deepspeed initialization.
         # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
@@ -748,41 +762,19 @@ class Wan22Trainer:
                             wandb_payload[f"train/{key}"] = value
                         self._wandb_log(wandb_payload)
 
-                    if (
-                        self.eval_every > 0
-                        and self.val_dataset is not None
-                        and self.global_step % self.eval_every == 0
-                    ):
-                        metrics = self.evaluate()
+                    if self.global_step in PHASE7_VAL_STEPS:
+                        metrics = evaluate_fixed(self)
                         self.accelerator.wait_for_everyone()
                         if metrics is not None and self.accelerator.is_main_process:
-                            description = "[eval] step=%d val_loss=%.4f infer_psnr=%.4f infer_ssim=%.4f" % (
+                            logger.info(
+                                "[eval] step=%d val_loss=%.6f clips=%d",
                                 self.global_step,
                                 metrics["val_loss"],
-                                metrics["psnr_rd"],
-                                metrics["ssim_rd"],
+                                metrics["clips"],
                             )
-                            if "action_l2" in metrics:
-                                description += " action_l2=%.4f" % metrics["action_l2"]
-                            if "action_l1" in metrics:
-                                description += " action_l1=%.4f" % metrics["action_l1"]
-                            logger.info(description)
-                            eval_payload = {
-                                "eval/val_loss": float(metrics["val_loss"]),
-                                "eval/psnr_rg": float(metrics["psnr_rg"]),
-                                "eval/ssim_rg": float(metrics["ssim_rg"]),
-                                "eval/psnr_rd": float(metrics["psnr_rd"]),
-                                "eval/ssim_rd": float(metrics["ssim_rd"]),
-                                "eval/psnr_dg": float(metrics["psnr_dg"]),
-                                "eval/ssim_dg": float(metrics["ssim_dg"]),
-                            }
-                            if "action_l2" in metrics:
-                                eval_payload["eval/action_l2"] = float(metrics["action_l2"])
-                            if "action_l1" in metrics:
-                                eval_payload["eval/action_l1"] = float(metrics["action_l1"])
-                            self._wandb_log(eval_payload)
+                            self._wandb_log({f"eval/{key}": value for key, value in metrics.items()})
 
-                    if self.save_every > 0 and self.global_step % self.save_every == 0:
+                    if self.global_step in PHASE7_FULL_SAVE_STEPS:
                         ckpt_info = self.save_checkpoint()
                         if self.accelerator.is_main_process:
                             logger.info(
