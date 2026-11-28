@@ -1,7 +1,9 @@
-"""Fixed 80-clip held-out validation for FastWAM (phase 7 / 20k retrain).
+"""Fixed held-out validation for FastWAM (phase 8 / multi-task fine-tune).
 
-Protocol identical to experiment 5 so curves stay comparable:
-  * 10 held-out episodes x 8 non-tail windows = 80 clips, same windows every run.
+Protocol identical to earlier phases so curves stay comparable:
+  * every held-out episode x 8 non-tail windows = N_episodes*8 clips (10 eps ->
+    80 clips single-task, 110 eps -> 880 clips for all 11 tasks), same windows
+    every run.
   * Deterministic noise: seed = 420000 + frame_index, no image augmentation.
   * Records `validation_history.jsonl` and `best_checkpoint.json`, and saves the
     current-best deploy weights as `best_step_<step>.pt` (previous best is removed
@@ -30,7 +32,8 @@ def evaluate_fixed(self):
     for start, end in zip(bounds['from'], bounds['to']):
         # Avoid tail replication for selection; same eight windows per episode.
         indices.extend(np.linspace(int(start), max(int(start), int(end)-33), 8, dtype=int).tolist())
-    assert len(indices) == 80 and len(set(indices)) == 80
+    # Dynamic clip count: 10 episodes -> 80 clips (single task), 110 -> 880 (11 tasks).
+    assert len(indices) == len(set(indices))
     rank = self.accelerator.process_index
     world = self.accelerator.num_processes
     totals = torch.zeros(2, device=self.accelerator.device, dtype=torch.float64)
@@ -78,13 +81,13 @@ def evaluate_fixed(self):
             temp = path.with_suffix('.pt.incomplete')
             model.save_checkpoint(str(temp), optimizer=None, step=self.global_step)
             os.replace(temp, path)
-            # Phase 7: keep only the current-best deploy weight to bound disk.
+            # Phase 8: keep only the current-best deploy weight to bound disk.
             prev_weights = best.get('weights_path')
             if prev_weights and Path(prev_weights).exists() and Path(prev_weights).resolve() != path.resolve():
                 Path(prev_weights).unlink()
             best = dict(step=self.global_step, validation_loss=result['val_loss'], weights_path=str(path),
                         dataset_stats=str(folder/'dataset_stats.json'),
-                        protocol='fixed_80_clips_seed_420000_plus_frame_index',
+                        protocol=f'fixed_{len(indices)}_clips_seed_420000_plus_frame_index',
                         validation_indices=indices)
             temporary = bestfile.with_suffix('.tmp')
             temporary.write_text(json.dumps(best, indent=2)+'\n')

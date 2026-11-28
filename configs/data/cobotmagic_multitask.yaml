@@ -1,0 +1,127 @@
+# CobotMagic multi-task FastWAM fine-tuning data config (experiment 8).
+#
+# Same as configs/data/cobotmagic.yaml, except:
+#   * dataset_dirs -> merged multi-task train/val sets (produced by
+#     openpi/scripts/merge_multitask.py --tasks ...)
+#   * val_set_proportion 0.0 -> the split is already materialized in the
+#     _train / _val directories (identical to experiment 7's override)
+#   * pretrained_norm_stats null -> computed from the merged train set on first run
+#
+# Requires symlinks (see 8.md):
+#   repos/FastWAM/data/cobotmagic_multitask_train -> $WS/data/RoboSynChallenge/cobotmagic_Real_multitask_train
+#   repos/FastWAM/data/cobotmagic_multitask_val   -> $WS/data/RoboSynChallenge/cobotmagic_Real_multitask_val
+# Per-episode instruction is read from each episode's task (tasks.jsonl has N entries).
+
+train:
+  _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
+  dataset_dirs:
+    - ./data/cobotmagic_multitask_train
+  shape_meta:
+    images:
+      - key: cam_high
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+      - key: cam_left_wrist
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+      - key: cam_right_wrist
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+    action:
+      - key: default
+        raw_shape: 32
+        shape: 32
+    state:
+      - key: default
+        raw_shape: 32
+        shape: 32
+  num_frames: 33
+  global_sample_stride: 1
+  action_video_freq_ratio: 4 # 32 action, 9 video frames
+  video_size: [384, 320]
+  camera_key: null
+  val_set_proportion: 0.0 # pre-split _train / _val dirs
+  is_training_set: true
+  pretrained_norm_stats: null # compute stats from merged train on first run
+  skip_padding_as_possible: false
+  concat_multi_camera: "robotwin"
+  processor:
+    _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
+    shape_meta: ${data.train.shape_meta}
+    num_obs_steps: ${data.train.num_frames}
+    num_output_cameras: 3
+    action_output_dim: 32
+    proprio_output_dim: 32
+    action_state_transforms: null
+    use_stepwise_action_norm: False
+    norm_default_mode: "z-score"
+    norm_exception_mode: null
+    action_state_merger:
+      _target_: fastwam.datasets.lerobot.transforms.action_state_merger.ConcatLeftAlign
+    train_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [240, 320]
+    val_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [240, 320]
+  text_embedding_cache_dir: ./data/text_embeds_cache/cobotmagic_multitask
+  context_len: 128
+
+val:
+  _target_: fastwam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
+  dataset_dirs:
+    - ./data/cobotmagic_multitask_val
+  shape_meta:
+    images:
+      - key: cam_high
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+      - key: cam_left_wrist
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+      - key: cam_right_wrist
+        raw_shape: [3, 480, 640]
+        shape: [3, 240, 320]
+    action:
+      - key: default
+        raw_shape: 32
+        shape: 32
+    state:
+      - key: default
+        raw_shape: 32
+        shape: 32
+  num_frames: 33
+  global_sample_stride: 1
+  action_video_freq_ratio: 4 # 32 action, 9 video frames
+  video_size: [384, 320]
+  camera_key: null
+  val_set_proportion: 0.0
+  is_training_set: false
+  pretrained_norm_stats: null # resolved to <output_dir>/dataset_stats.json at runtime
+  skip_padding_as_possible: false
+  concat_multi_camera: "robotwin"
+  processor:
+    _target_: fastwam.datasets.lerobot.processors.fastwam_processor.FastWAMProcessor
+    shape_meta: ${data.train.shape_meta}
+    num_obs_steps: ${data.train.num_frames}
+    num_output_cameras: 3
+    action_output_dim: 32
+    proprio_output_dim: 32
+    action_state_transforms: null
+    use_stepwise_action_norm: False
+    norm_default_mode: "z-score"
+    norm_exception_mode: null
+    action_state_merger:
+      _target_: fastwam.datasets.lerobot.transforms.action_state_merger.ConcatLeftAlign
+    train_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [240, 320]
+    val_transforms:
+      - _target_: fastwam.datasets.lerobot.transforms.image.ToTensor
+      - _target_: torchvision.transforms.Resize
+        size: [240, 320]
+  text_embedding_cache_dir: ./data/text_embeds_cache/cobotmagic_multitask
+  context_len: 128

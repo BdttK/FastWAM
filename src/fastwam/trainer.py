@@ -22,13 +22,13 @@ from .utils.samplers import ResumableEpochSampler
 from .utils.video_io import save_mp4
 from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_ssim
 
-from .phase5_validation import evaluate_fixed
+from .phase8_validation import evaluate_fixed
 
 logger = get_logger(__name__)
 
-# Phase 7 (20k retrain): validation and full-resume-checkpoint step schedules.
-PHASE7_VAL_STEPS = (500, 1000, 3000, 6000, 9000, 10000, 12000, 15000, 18000, 20000)
-PHASE7_FULL_SAVE_STEPS = (10000,)
+# Phase 8 (multi-task): validation and full-resume-checkpoint step schedules.
+PHASE8_VAL_STEPS = (500, 1000, 3000, 6000, 9000, 10000, 12000, 15000, 18000, 20000)
+PHASE8_FULL_SAVE_STEPS = (10000,)
 
 
 class Wan22Trainer:
@@ -626,14 +626,10 @@ class Wan22Trainer:
             ckpt_path = self._save_weights_checkpoint(step_tag=step_tag)
         self.accelerator.wait_for_everyone()
 
-        state_path = os.path.join(self.state_dir, step_tag)
-        ensure_dir(state_path)
-        self.accelerator.save_state(output_dir=state_path)
-        if self.accelerator.is_main_process:
-            self._save_trainer_state(state_path)
-        self.accelerator.wait_for_everyone()
-
-        return {"weights_path": ckpt_path, "state_path": state_path}
+        # Phase 8: deploy-only checkpoints -- skip the accelerator/optimizer
+        # state (no mid-run resume), so each checkpoint is ~10GB of weights
+        # instead of ~35GB with the optimizer state.
+        return {"weights_path": ckpt_path, "state_path": None}
 
     def load_training_state(self, state_dir: str):
         self.accelerator.load_state(input_dir=state_dir)
@@ -762,7 +758,7 @@ class Wan22Trainer:
                             wandb_payload[f"train/{key}"] = value
                         self._wandb_log(wandb_payload)
 
-                    if self.global_step in PHASE7_VAL_STEPS:
+                    if self.global_step in PHASE8_VAL_STEPS:
                         metrics = evaluate_fixed(self)
                         self.accelerator.wait_for_everyone()
                         if metrics is not None and self.accelerator.is_main_process:
@@ -774,7 +770,7 @@ class Wan22Trainer:
                             )
                             self._wandb_log({f"eval/{key}": value for key, value in metrics.items()})
 
-                    if self.global_step in PHASE7_FULL_SAVE_STEPS:
+                    if self.global_step in PHASE8_FULL_SAVE_STEPS:
                         ckpt_info = self.save_checkpoint()
                         if self.accelerator.is_main_process:
                             logger.info(

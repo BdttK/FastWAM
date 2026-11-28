@@ -1,0 +1,43 @@
+# @package _global_
+#
+# Fine-tune FastWAM from the RobotWin 2.0 checkpoint on the merged multi-task
+# CobotMagic Piper dataset (experiment 8). Task selection is done at merge time
+# by openpi/scripts/merge_multitask.py --tasks ...; this config reads the merged
+# _train / _val dirs.
+#
+# Launch:
+#   bash scripts/train_multitask.sh "0,1,2,3,4,5,6,7,8,9,10"
+#
+# Validation runs at the same step list as the trainer's PHASE8_VAL_STEPS in
+# src/fastwam/trainer.py: 500,1000,3000,6000,9000,10000,12000,15000,18000,20000.
+# Full checkpoints only at 10000 and 20000.
+
+defaults:
+  - override /data: cobotmagic_multitask
+  - override /model: fastwam
+  - _self_
+
+# Comma-separated 0-indexed task ids that this run expects the merged dataset to
+# contain. train_multitask.sh validates it against the split manifest.
+tasks: "0,1,2,3,4,5,6,7,8,9,10"
+
+# dataloading
+batch_size: 16 # overridden by train_multitask.sh to 2 with accumulation 8 (global 128)
+num_workers: 8
+
+model:
+  mot_checkpoint_mixed_attn: false
+
+# scheduler
+lr_scheduler_type: "cosine"
+learning_rate: 1e-4
+num_epochs: 20
+max_steps: 20000
+log_every: 10
+save_every: 200
+eval_every: 50
+
+# training
+gradient_accumulation_steps: 1
+weight_decay: 1e-2
+resume: ./checkpoints/fastwam_release/robotwin_uncond_3cam_384.pt # start from RobotWin 2.0 weights
